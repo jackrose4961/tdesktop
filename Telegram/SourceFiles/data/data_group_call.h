@@ -19,6 +19,8 @@ struct ParticipantVideoParams;
 
 namespace Data {
 
+[[nodiscard]] const std::string &RtmpEndpointId();
+
 struct LastSpokeTimes {
 	crl::time anything = 0;
 	crl::time voice = 0;
@@ -32,14 +34,14 @@ struct GroupCallParticipant {
 	uint64 raisedHandRating = 0;
 	uint32 ssrc = 0;
 	int volume = 0;
-	bool sounding : 1;
-	bool speaking : 1;
-	bool additionalSounding : 1;
-	bool additionalSpeaking : 1;
-	bool muted : 1;
-	bool mutedByMe : 1;
-	bool canSelfUnmute : 1;
-	bool onlyMinLoaded : 1;
+	bool sounding : 1 = false;
+	bool speaking : 1 = false;
+	bool additionalSounding : 1 = false;
+	bool additionalSpeaking : 1 = false;
+	bool muted : 1 = false;
+	bool mutedByMe : 1 = false;
+	bool canSelfUnmute : 1 = false;
+	bool onlyMinLoaded : 1 = false;
 	bool videoJoined = false;
 	bool applyVolumeFromMin = true;
 
@@ -55,11 +57,14 @@ public:
 		not_null<PeerData*> peer,
 		CallId id,
 		CallId accessHash,
-		TimeId scheduleDate);
+		TimeId scheduleDate,
+		bool rtmp);
 	~GroupCall();
 
 	[[nodiscard]] CallId id() const;
 	[[nodiscard]] bool loaded() const;
+	[[nodiscard]] bool rtmp() const;
+	[[nodiscard]] bool listenersHidden() const;
 	[[nodiscard]] not_null<PeerData*> peer() const;
 	[[nodiscard]] MTPInputGroupCall input() const;
 	[[nodiscard]] QString title() const {
@@ -151,6 +156,7 @@ public:
 
 	void setInCall();
 	void reload();
+	void reloadIfStale();
 	void processFullCall(const MTPphone_GroupCall &call);
 
 	void setJoinMutedLocally(bool muted);
@@ -201,6 +207,7 @@ private:
 	int _version = 0;
 	mtpRequestId _participantsRequestId = 0;
 	mtpRequestId _reloadRequestId = 0;
+	crl::time _reloadLastFinished = 0;
 	rpl::variable<QString> _title;
 
 	base::flat_multi_map<
@@ -239,6 +246,8 @@ private:
 	bool _allParticipantsLoaded = false;
 	bool _joinedToTop = false;
 	bool _applyingQueuedUpdates = false;
+	bool _rtmp = false;
+	bool _listenersHidden = false;
 
 };
 

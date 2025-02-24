@@ -7,23 +7,35 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "boxes/peers/peer_short_info_box.h"
 
-#include "ui/effects/radial_animation.h"
-#include "ui/widgets/labels.h"
-#include "ui/widgets/scroll_area.h"
-#include "ui/wrap/vertical_layout.h"
-#include "ui/wrap/slide_wrap.h"
-#include "ui/wrap/wrap.h"
-#include "ui/image/image_prepare.h"
-#include "ui/text/text_utilities.h"
+#include "base/event_filter.h"
+#include "core/application.h"
 #include "info/profile/info_profile_text.h"
+#include "info/profile/info_profile_values.h"
+#include "lang/lang_keys.h"
 #include "media/streaming/media_streaming_instance.h"
 #include "media/streaming/media_streaming_player.h"
-#include "base/event_filter.h"
-#include "lang/lang_keys.h"
-#include "styles/style_layers.h"
+#include "ui/effects/radial_animation.h"
+#include "ui/image/image_prepare.h"
+#include "ui/painter.h"
+#include "ui/text/text_utilities.h"
+#include "ui/widgets/labels.h"
+#include "ui/widgets/menu/menu_add_action_callback.h"
+#include "ui/widgets/menu/menu_add_action_callback_factory.h"
+#include "ui/widgets/popup_menu.h"
+#include "ui/widgets/scroll_area.h"
+#include "ui/wrap/slide_wrap.h"
+#include "ui/wrap/vertical_layout.h"
+#include "ui/wrap/wrap.h"
+#include "window/window_controller.h"
+#include "window/window_session_controller.h"
+#include "styles/style_boxes.h"
 #include "styles/style_info.h"
+#include "styles/style_layers.h"
+#include "styles/style_menu_icons.h"
 
 namespace {
+
+using MenuCallback = Ui::Menu::MenuCallback;
 
 constexpr auto kShadowMaxAlpha = 80;
 constexpr auto kInactiveBarOpacity = 0.5;
@@ -93,6 +105,9 @@ PeerShortInfoCover::PeerShortInfoCover(
 , _name(_widget.get(), std::move(name), _nameStyle->st)
 , _statusStyle(std::make_unique<CustomLabelStyle>(_st.status))
 , _status(_widget.get(), std::move(status), _statusStyle->st)
+, _roundMask(Images::CornersMask(_st.radius))
+, _roundMaskRetina(
+	Images::CornersMask(_st.radius / style::DevicePixelRatio()))
 , _videoPaused(std::move(videoPaused)) {
 	_widget->setCursor(_cursor);
 
@@ -102,6 +117,7 @@ PeerShortInfoCover::PeerShortInfoCover(
 		userpic
 	) | rpl::start_with_next([=](PeerShortInfoUserpic &&value) {
 		applyUserpic(std::move(value));
+		applyAdditionalStatus(value.additionalStatus);
 	}, lifetime());
 
 	style::PaletteChanged(
@@ -133,19 +149,10 @@ PeerShortInfoCover::PeerShortInfoCover(
 		return base::EventFilterResult::Cancel;
 	});
 
-	_name->moveToLeft(
-		_st.namePosition.x(),
-		_st.size - _st.namePosition.y() - _name->height(),
-		_st.size);
-	_status->moveToLeft(
-		_st.statusPosition.x(),
-		(_st.size
-			- _st.statusPosition.y()
-			- _status->height()),
-		_st.size);
+	refreshLabelsGeometry();
 
 	_roundedTopImage = QImage(
-		QSize(_st.size, st::boxRadius) * style::DevicePixelRatio(),
+		QSize(_st.size, _st.radius) * style::DevicePixelRatio(),
 		QImage::Format_ARGB32_Premultiplied);
 	_roundedTopImage.setDevicePixelRatio(style::DevicePixelRatio());
 	_roundedTopImage.fill(Qt::transparent);
@@ -159,6 +166,10 @@ not_null<Ui::RpWidget*> PeerShortInfoCover::widget() const {
 
 object_ptr<Ui::RpWidget> PeerShortInfoCover::takeOwned() {
 	return std::move(_owned);
+}
+
+gsl::span<const QImage, 4> PeerShortInfoCover::roundMask() const {
+	return _roundMask;
 }
 
 void PeerShortInfoCover::setScrollTop(int scrollTop) {
@@ -176,18 +187,22 @@ rpl::lifetime &PeerShortInfoCover::lifetime() {
 
 void PeerShortInfoCover::paint(QPainter &p) {
 	checkStreamedIsStarted();
-	const auto frame = currentVideoFrame();
+	auto frame = currentVideoFrame();
 	auto paused = _videoPaused && _videoPaused();
-	if (frame.isNull() && _userpicImage.isNull()) {
+	if (!frame.isNull()) {
+		frame = Images::Round(
+			std::move(frame),
+			_roundMaskRetina,
+			RectPart::TopLeft | RectPart::TopRight);
+	} else if (_userpicImage.isNull()) {
 		auto image = QImage(
 			_widget->size() * style::DevicePixelRatio(),
 			QImage::Format_ARGB32_Premultiplied);
 		image.fill(Qt::black);
-		Images::prepareRound(
-			image,
-			ImageRoundRadius::Small,
+		_userpicImage = Images::Round(
+			std::move(image),
+			_roundMask,
 			RectPart::TopLeft | RectPart::TopRight);
-		_userpicImage = std::move(image);
 	}
 
 	paintCoverImage(p, frame.isNull() ? _userpicImage : frame);
@@ -201,7 +216,7 @@ void PeerShortInfoCover::paint(QPainter &p) {
 
 void PeerShortInfoCover::paintCoverImage(QPainter &p, const QImage &image) {
 	const auto roundedWidth = _st.size;
-	const auto roundedHeight = st::boxRadius;
+	const auto roundedHeight = _st.radius;
 	const auto covered = (_st.size - _scrollTop);
 	if (covered <= 0) {
 		return;
@@ -213,10 +228,11 @@ void PeerShortInfoCover::paintCoverImage(QPainter &p, const QImage &image) {
 	const auto top = _widget->height() - fill;
 	const auto factor = style::DevicePixelRatio();
 	if (fill > 0) {
+		const auto t = roundedHeight + _scrollTop;
 		p.drawImage(
-			QRect(0, top, roundedWidth, fill),
+			QRect(0, t, roundedWidth * factor, (roundedWidth - t) * factor),
 			image,
-			QRect(0, top * factor, roundedWidth * factor, fill * factor));
+			QRect(0, t, roundedWidth * factor, (roundedWidth - t) * factor));
 	}
 	if (covered <= 0) {
 		return;
@@ -225,13 +241,13 @@ void PeerShortInfoCover::paintCoverImage(QPainter &p, const QImage &image) {
 	const auto from = top - rounded;
 	auto q = QPainter(&_roundedTopImage);
 	q.drawImage(
-		QRect(0, 0, roundedWidth, rounded),
+		QRect(0, 0, roundedWidth * factor, rounded * factor),
 		image,
-		QRect(0, from * factor, roundedWidth * factor, rounded * factor));
+		QRect(0, _scrollTop, roundedWidth * factor, rounded * factor));
 	q.end();
-	Images::prepareRound(
-		_roundedTopImage,
-		ImageRoundRadius::Small,
+	_roundedTopImage = Images::Round(
+		std::move(_roundedTopImage),
+		_roundMask,
 		RectPart::TopLeft | RectPart::TopRight);
 	p.drawImage(
 		QRect(0, from, roundedWidth, rounded),
@@ -244,10 +260,9 @@ void PeerShortInfoCover::paintBars(QPainter &p) {
 	const auto factor = style::DevicePixelRatio();
 	if (_shadowTop.isNull()) {
 		_shadowTop = Images::GenerateShadow(height, kShadowMaxAlpha, 0);
-		_shadowTop = _shadowTop.scaled(QSize(_st.size, height) * factor);
-		Images::prepareRound(
-			_shadowTop,
-			ImageRoundRadius::Small,
+		_shadowTop = Images::Round(
+			_shadowTop.scaled(QSize(_st.size, height) * factor),
+			_roundMask,
 			RectPart::TopLeft | RectPart::TopRight);
 	}
 	const auto shadowRect = QRect(0, _scrollTop, _st.size, height);
@@ -395,16 +410,31 @@ void PeerShortInfoCover::paintRadial(QPainter &p) {
 QImage PeerShortInfoCover::currentVideoFrame() const {
 	const auto size = QSize(_st.size, _st.size);
 	const auto request = Media::Streaming::FrameRequest{
-		.resize = size * style::DevicePixelRatio(),
+		.resize = size,
 		.outer = size,
-		.radius = ImageRoundRadius::Small,
-		.corners = RectPart::TopLeft | RectPart::TopRight,
 	};
 	return (_videoInstance
 		&& _videoInstance->player().ready()
 		&& !_videoInstance->player().videoSize().isEmpty())
 		? _videoInstance->frame(request)
 		: QImage();
+}
+
+void PeerShortInfoCover::applyAdditionalStatus(const QString &status) {
+	if (status.isEmpty()) {
+		if (_additionalStatus) {
+			_additionalStatus.destroy();
+			refreshLabelsGeometry();
+		}
+		return;
+	}
+	if (_additionalStatus) {
+		_additionalStatus->setText(status);
+	} else {
+		_additionalStatus.create(_widget.get(), status, _statusStyle->st);
+		_additionalStatus->show();
+		refreshLabelsGeometry();
+	}
 }
 
 void PeerShortInfoCover::applyUserpic(PeerShortInfoUserpic &&value) {
@@ -422,9 +452,12 @@ void PeerShortInfoCover::applyUserpic(PeerShortInfoUserpic &&value) {
 		const auto videoChanged = _videoInstance
 			? (_videoInstance->shared() != value.videoDocument)
 			: (value.videoDocument != nullptr);
-		const auto frame = videoChanged ? currentVideoFrame() : QImage();
+		auto frame = videoChanged ? currentVideoFrame() : QImage();
 		if (!frame.isNull()) {
-			_userpicImage = frame;
+			_userpicImage = Images::Round(
+				std::move(frame),
+				_roundMask,
+				RectPart::TopLeft | RectPart::TopRight);
 		}
 	} else if (_userpicImage.cacheKey() != value.photo.cacheKey()) {
 		_userpicImage = std::move(value.photo);
@@ -513,15 +546,16 @@ void PeerShortInfoCover::handleStreamingUpdate(
 
 	v::match(update.data, [&](Information &update) {
 		streamingReady(std::move(update));
-	}, [&](const PreloadedVideo &update) {
-	}, [&](const UpdateVideo &update) {
+	}, [](PreloadedVideo) {
+	}, [&](UpdateVideo update) {
 		_videoPosition = update.position;
 		_widget->update();
-	}, [&](const PreloadedAudio &update) {
-	}, [&](const UpdateAudio &update) {
-	}, [&](const WaitingForData &update) {
-	}, [&](MutedByOther) {
-	}, [&](Finished) {
+	}, [](PreloadedAudio) {
+	}, [](UpdateAudio) {
+	}, [](WaitingForData) {
+	}, [](SpeedEstimate) {
+	}, [](MutedByOther) {
+	}, [](Finished) {
 	});
 }
 
@@ -582,6 +616,28 @@ void PeerShortInfoCover::refreshBarImages() {
 	_barLarge = makeBar(_largeWidth);
 }
 
+void PeerShortInfoCover::refreshLabelsGeometry() {
+	const auto statusTop = _st.size
+		- _st.statusPosition.y()
+		- _status->height();
+	const auto diff = _st.namePosition.y()
+		- _name->height()
+		- _st.statusPosition.y();
+	if (_additionalStatus) {
+		_additionalStatus->moveToLeft(
+			_status->x(),
+			statusTop - diff - _additionalStatus->height());
+	}
+	_name->moveToLeft(
+		_st.namePosition.x(),
+		_st.size
+			- _st.namePosition.y()
+			- _name->height()
+			- (_additionalStatus ? (diff + _additionalStatus->height()) : 0),
+		_st.size);
+	_status->moveToLeft(_st.statusPosition.x(), statusTop, _st.size);
+}
+
 QRect PeerShortInfoCover::radialRect() const {
 	const auto cover = _widget->rect();
 	const auto size = st::boxLoadingSize;
@@ -604,8 +660,10 @@ PeerShortInfoBox::PeerShortInfoBox(
 	rpl::producer<PeerShortInfoFields> fields,
 	rpl::producer<QString> status,
 	rpl::producer<PeerShortInfoUserpic> userpic,
-	Fn<bool()> videoPaused)
-: _type(type)
+	Fn<bool()> videoPaused,
+	const style::ShortInfoBox *stOverride)
+: _st(stOverride ? *stOverride : st::shortInfoBox)
+, _type(type)
 , _fields(std::move(fields))
 , _topRoundBackground(this)
 , _scroll(this, st::shortInfoScroll)
@@ -641,12 +699,16 @@ rpl::producer<int> PeerShortInfoBox::moveRequests() const {
 void PeerShortInfoBox::prepare() {
 	addButton(tr::lng_close(), [=] { closeBox(); });
 
-	// Perhaps a new lang key should be added for opening a group.
-	addLeftButton((_type == PeerShortInfoType::User)
-		? tr::lng_profile_send_message()
-		: (_type == PeerShortInfoType::Group)
-		? tr::lng_view_button_group()
-		: tr::lng_profile_view_channel(), [=] { _openRequests.fire({}); });
+	if (_type != PeerShortInfoType::Self) {
+		// Perhaps a new lang key should be added for opening a group.
+		addLeftButton(
+			(_type == PeerShortInfoType::User)
+				? tr::lng_profile_send_message()
+				: (_type == PeerShortInfoType::Group)
+				? tr::lng_view_button_group()
+				: tr::lng_profile_view_channel(),
+			[=] { _openRequests.fire({}); });
+	}
 
 	prepareRows();
 
@@ -672,6 +734,7 @@ void PeerShortInfoBox::prepare() {
 	_roundedTop.setDevicePixelRatio(style::DevicePixelRatio());
 	refreshRoundedTopImage(getDelegate()->style().bg->c);
 
+	setCustomCornersFilling(RectPart::FullTop);
 	setDimensionsToContent(st::shortInfoWidth, _rows);
 }
 
@@ -681,11 +744,12 @@ void PeerShortInfoBox::prepareRows() {
 	auto addInfoLineGeneric = [&](
 			rpl::producer<QString> &&label,
 			rpl::producer<TextWithEntities> &&text,
-			const style::FlatLabel &textSt = st::infoLabeled) {
+			const style::FlatLabel &textSt) {
 		auto line = CreateTextWithLabel(
 			_rows,
 			rpl::duplicate(label) | Ui::Text::ToWithEntities(),
 			rpl::duplicate(text),
+			_st.label,
 			textSt,
 			st::shortInfoLabeledPadding);
 		_rows->add(object_ptr<Ui::OverrideMargins>(
@@ -705,7 +769,7 @@ void PeerShortInfoBox::prepareRows() {
 	auto addInfoLine = [&](
 			rpl::producer<QString> &&label,
 			rpl::producer<TextWithEntities> &&text,
-			const style::FlatLabel &textSt = st::infoLabeled) {
+			const style::FlatLabel &textSt) {
 		return addInfoLineGeneric(
 			std::move(label),
 			std::move(text),
@@ -718,11 +782,15 @@ void PeerShortInfoBox::prepareRows() {
 		auto result = addInfoLine(
 			std::move(label),
 			std::move(text),
-			st::infoLabeledOneLine);
+			_st.labeledOneLine);
 		result->setDoubleClickSelectsParagraph(true);
 		result->setContextCopyText(contextCopyText);
 		return result;
 	};
+	addInfoOneLine(
+		tr::lng_settings_channel_label(),
+		channelValue(),
+		tr::lng_context_copy_link(tr::now));
 	addInfoOneLine(
 		tr::lng_info_link_label(),
 		linkValue(),
@@ -734,15 +802,15 @@ void PeerShortInfoBox::prepareRows() {
 	auto label = _fields.current().isBio
 		? tr::lng_info_bio_label()
 		: tr::lng_info_about_label();
-	addInfoLine(std::move(label), aboutValue());
+	addInfoLine(std::move(label), aboutValue(), _st.labeled);
 	addInfoOneLine(
 		tr::lng_info_username_label(),
 		usernameValue() | Ui::Text::ToWithEntities(),
 		tr::lng_context_copy_mention(tr::now));
-}
-
-RectParts PeerShortInfoBox::customCornersFilling() {
-	return RectPart::FullTop;
+	addInfoOneLine(
+		birthdayLabel(),
+		birthdayValue() | Ui::Text::ToWithEntities(),
+		tr::lng_mediaview_copy(tr::now));
 }
 
 void PeerShortInfoBox::resizeEvent(QResizeEvent *e) {
@@ -771,34 +839,77 @@ int PeerShortInfoBox::fillRoundedTopHeight() {
 void PeerShortInfoBox::refreshRoundedTopImage(const QColor &color) {
 	_roundedTopColor = color;
 	_roundedTop.fill(color);
-	Images::prepareRound(
-		_roundedTop,
-		ImageRoundRadius::Small,
+	_roundedTop = Images::Round(
+		std::move(_roundedTop),
+		_cover.roundMask(),
 		RectPart::TopLeft | RectPart::TopRight);
 }
 
+rpl::producer<MenuCallback> PeerShortInfoBox::fillMenuRequests() const {
+	return _fillMenuRequests.events();
+}
+
+void PeerShortInfoBox::contextMenuEvent(QContextMenuEvent *e) {
+	_menuHolder = nullptr;
+	const auto menu = Ui::CreateChild<Ui::PopupMenu>(
+		this,
+		st::popupMenuWithIcons);
+	_fillMenuRequests.fire(Ui::Menu::CreateAddActionCallback(menu));
+	_menuHolder.reset(menu);
+	if (menu->empty()) {
+		_menuHolder = nullptr;
+		return;
+	}
+	menu->popup(e->globalPos());
+}
+
 rpl::producer<QString> PeerShortInfoBox::nameValue() const {
-	return _fields.value() | rpl::map([](const PeerShortInfoFields &fields) {
+	return _fields.value(
+	) | rpl::map([](const PeerShortInfoFields &fields) {
 		return fields.name;
 	}) | rpl::distinct_until_changed();
 }
 
+rpl::producer<TextWithEntities> PeerShortInfoBox::channelValue() const {
+	return _fields.value(
+	) | rpl::map([](const PeerShortInfoFields &fields) {
+		return Ui::Text::Link(fields.channelName, fields.channelLink);
+	}) | rpl::distinct_until_changed();
+}
+
 rpl::producer<TextWithEntities> PeerShortInfoBox::linkValue() const {
-	return _fields.value() | rpl::map([](const PeerShortInfoFields &fields) {
+	return _fields.value(
+	) | rpl::map([](const PeerShortInfoFields &fields) {
 		return Ui::Text::Link(fields.link, fields.link);
 	}) | rpl::distinct_until_changed();
 }
 
 rpl::producer<QString> PeerShortInfoBox::phoneValue() const {
-	return _fields.value() | rpl::map([](const PeerShortInfoFields &fields) {
+	return _fields.value(
+	) | rpl::map([](const PeerShortInfoFields &fields) {
 		return fields.phone;
 	}) | rpl::distinct_until_changed();
 }
 
 rpl::producer<QString> PeerShortInfoBox::usernameValue() const {
-	return _fields.value() | rpl::map([](const PeerShortInfoFields &fields) {
+	return _fields.value(
+	) | rpl::map([](const PeerShortInfoFields &fields) {
 		return fields.username;
 	}) | rpl::distinct_until_changed();
+}
+
+rpl::producer<QString> PeerShortInfoBox::birthdayLabel() const {
+	return Info::Profile::BirthdayLabelText(_fields.value(
+	) | rpl::map([](const PeerShortInfoFields &fields) {
+		return fields.birthday;
+	}) | rpl::distinct_until_changed());
+}
+
+rpl::producer<QString> PeerShortInfoBox::birthdayValue() const {
+	return Info::Profile::BirthdayValueText(_fields.value(
+	) | rpl::map([](const PeerShortInfoFields &fields) {
+		return fields.birthday;
+	}) | rpl::distinct_until_changed());
 }
 
 rpl::producer<TextWithEntities> PeerShortInfoBox::aboutValue() const {

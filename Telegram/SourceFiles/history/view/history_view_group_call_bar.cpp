@@ -11,6 +11,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "data/data_user.h"
 #include "data/data_changes.h"
 #include "data/data_group_call.h"
+#include "data/data_peer_values.h"
 #include "main/main_session.h"
 #include "ui/chat/group_call_bar.h"
 #include "ui/chat/group_call_userpics.h"
@@ -19,6 +20,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "calls/calls_instance.h"
 #include "core/application.h"
 #include "styles/style_chat.h"
+#include "styles/style_chat_helpers.h"
 
 namespace HistoryView {
 
@@ -36,13 +38,14 @@ void GenerateUserpicsInRow(
 	const auto single = st.size;
 	const auto shift = st.shift;
 	const auto width = single + (limit - 1) * (single - shift);
-	if (result.width() != width * cIntRetinaFactor()) {
+	const auto ratio = style::DevicePixelRatio();
+	if (result.width() != width * ratio) {
 		result = QImage(
-			QSize(width, single) * cIntRetinaFactor(),
+			QSize(width, single) * ratio,
 			QImage::Format_ARGB32_Premultiplied);
 	}
 	result.fill(Qt::transparent);
-	result.setDevicePixelRatio(cRetinaFactor());
+	result.setDevicePixelRatio(ratio);
 
 	auto q = Painter(&result);
 	auto hq = PainterHighQualityEnabler(q);
@@ -52,7 +55,7 @@ void GenerateUserpicsInRow(
 	for (auto i = count; i != 0;) {
 		auto &entry = list[--i];
 		q.setCompositionMode(QPainter::CompositionMode_SourceOver);
-		entry.peer->paintUserpic(q, entry.view, x, 0, single);
+		entry.peer->paintUserpic(q, entry.view, x, 0, single, true);
 		entry.uniqueKey = entry.peer->userpicUniqueKey(entry.view);
 		q.setCompositionMode(QPainter::CompositionMode_Source);
 		q.setBrush(Qt::NoBrush);
@@ -69,8 +72,10 @@ rpl::producer<Ui::GroupCallBarContent> GroupCallBarContentByCall(
 		std::vector<UserpicInRow> userpics;
 		Ui::GroupCallBarContent current;
 		base::has_weak_ptr guard;
+		uint64 ownerId = 0;
 		bool someUserpicsNotLoaded = false;
 		bool pushScheduled = false;
+		bool noUserpics = false;
 	};
 
 	// speaking DESC, std::max(date, lastActive) DESC
@@ -80,19 +85,29 @@ rpl::producer<Ui::GroupCallBarContent> GroupCallBarContentByCall(
 		return (~uint64(0)) - result; // sorting with less(), so invert.
 	};
 
+	static const auto RtmpCallTopBarParticipants = [](
+			not_null<Data::GroupCall*> call) {
+		using Participant = Data::GroupCallParticipant;
+		return std::vector<Participant>{ Participant{
+			.peer = call->peer(),
+		} };
+	};
+
 	constexpr auto kLimit = 3;
 	static const auto FillMissingUserpics = [](
 			not_null<State*> state,
 			not_null<Data::GroupCall*> call) {
 		const auto already = int(state->userpics.size());
-		const auto &participants = call->participants();
+		const auto &participants = call->rtmp()
+			? RtmpCallTopBarParticipants(call)
+			: call->participants();
 		if (already >= kLimit || participants.size() <= already) {
 			return false;
 		}
 		std::array<const Data::GroupCallParticipant*, kLimit> adding{
 			{ nullptr }
 		};
-		for (const auto &participant : call->participants()) {
+		for (const auto &participant : participants) {
 			const auto alreadyInList = ranges::contains(
 				state->userpics,
 				participant.peer,
@@ -138,12 +153,13 @@ rpl::producer<Ui::GroupCallBarContent> GroupCallBarContentByCall(
 		state->someUserpicsNotLoaded = false;
 		for (auto &userpic : state->userpics) {
 			userpic.peer->loadUserpic();
-			const auto pic = userpic.peer->genUserpic(
+			auto image = PeerData::GenerateUserpicImage(
+				userpic.peer,
 				userpic.view,
-				userpicSize);
+				userpicSize * style::DevicePixelRatio());
 			userpic.uniqueKey = userpic.peer->userpicUniqueKey(userpic.view);
 			state->current.users.push_back({
-				.userpic = pic.toImage(),
+				.userpic = std::move(image),
 				.userpicKey = userpic.uniqueKey,
 				.id = userpic.peer->id.value,
 				.speaking = userpic.speaking,
@@ -180,6 +196,9 @@ rpl::producer<Ui::GroupCallBarContent> GroupCallBarContentByCall(
 			int userpicSize) {
 		Expects(state->userpics.size() <= kLimit);
 
+		if (call->rtmp()) {
+			return false;
+		}
 		const auto &participants = call->participants();
 		auto i = begin(state->userpics);
 
@@ -243,6 +262,8 @@ rpl::producer<Ui::GroupCallBarContent> GroupCallBarContentByCall(
 	return [=](auto consumer) {
 		auto lifetime = rpl::lifetime();
 		auto state = lifetime.make_state<State>();
+		state->noUserpics = call->listenersHidden();
+		state->ownerId = call->peer()->id.value;
 		state->current.shown = true;
 		state->current.livestream = call->peer()->isBroadcast();
 
@@ -253,7 +274,18 @@ rpl::producer<Ui::GroupCallBarContent> GroupCallBarContentByCall(
 			state->pushScheduled = true;
 			crl::on_main(&state->guard, [=] {
 				state->pushScheduled = false;
-				consumer.put_next_copy(state->current);
+				auto copy = state->current;
+				if (state->noUserpics && copy.count > 0) {
+					const auto i = ranges::find(
+						copy.users,
+						state->ownerId,
+						&Ui::GroupCallUser::id);
+					if (i != end(copy.users)) {
+						copy.users.erase(i);
+						--copy.count;
+					}
+				}
+				consumer.put_next(std::move(copy));
 			});
 		};
 
@@ -348,15 +380,22 @@ rpl::producer<Ui::GroupCallBarContent> GroupCallBarContentByCall(
 
 rpl::producer<Ui::GroupCallBarContent> GroupCallBarContentByPeer(
 		not_null<PeerData*> peer,
-		int userpicSize) {
+		int userpicSize,
+		bool showInForum) {
+	const auto channel = peer->asChannel();
 	return rpl::combine(
 		peer->session().changes().peerFlagsValue(
 			peer,
 			Data::PeerUpdate::Flag::GroupCall),
-		Core::App().calls().currentGroupCallValue()
-	) | rpl::map([=](const auto&, Calls::GroupCall *current) {
+		Core::App().calls().currentGroupCallValue(),
+		((showInForum || !channel)
+			? (rpl::single(false) | rpl::type_erased())
+			: Data::PeerFlagValue(channel, ChannelData::Flag::Forum))
+	) | rpl::map([=](auto, Calls::GroupCall *current, bool hiddenByForum) {
 		const auto call = peer->groupCall();
-		return (call && (!current || current->peer() != peer))
+		return (call
+			&& !hiddenByForum
+			&& (!current || current->peer() != peer))
 			? call
 			: nullptr;
 	}) | rpl::distinct_until_changed(
@@ -364,9 +403,8 @@ rpl::producer<Ui::GroupCallBarContent> GroupCallBarContentByPeer(
 	-> rpl::producer<Ui::GroupCallBarContent> {
 		if (!call) {
 			return rpl::single(Ui::GroupCallBarContent{ .shown = false });
-		} else if (!call->fullCount() && !call->participantsLoaded()) {
-			call->reload();
 		}
+		call->reloadIfStale();
 		return GroupCallBarContentByCall(call, userpicSize);
 	}) | rpl::flatten_latest();
 }

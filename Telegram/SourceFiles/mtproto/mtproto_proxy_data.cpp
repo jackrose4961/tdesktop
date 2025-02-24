@@ -8,7 +8,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "mtproto/mtproto_proxy_data.h"
 
 #include "base/qthelp_url.h"
-#include "base/qt_adapters.h"
+#include "base/qt/qt_string_view.h"
 
 namespace MTP {
 namespace {
@@ -157,11 +157,12 @@ bool ProxyData::supportsCalls() const {
 }
 
 bool ProxyData::tryCustomResolve() const {
+	static const auto RegExp = QRegularExpression(
+		QStringLiteral("^\\d+\\.\\d+\\.\\d+\\.\\d+$")
+	);
 	return (type == Type::Socks5 || type == Type::Mtproto)
 		&& !qthelp::is_ipv6(host)
-		&& !QRegularExpression(
-			QStringLiteral("^\\d+\\.\\d+\\.\\d+\\.\\d+$")
-		).match(host).hasMatch();
+		&& !RegExp.match(host).hasMatch();
 }
 
 bytes::vector ProxyData::secretFromMtprotoPassword() const {

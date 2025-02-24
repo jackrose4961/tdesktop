@@ -5,7 +5,6 @@ on:
     paths-ignore:
       - 'docs/**'
       - '**.md'
-      - '!docs/building-mac.md'
       - 'changelog.txt'
       - 'LEGAL'
       - 'LICENSE'
@@ -23,7 +22,6 @@ on:
     paths-ignore:
       - 'docs/**'
       - '**.md'
-      - '!docs/building-mac.md'
       - 'changelog.txt'
       - 'LEGAL'
       - 'LICENSE'
@@ -42,22 +40,23 @@ jobs:
 
   macos:
     name: MacOS
-    runs-on: macos-latest
+    runs-on: macos-13
 
     strategy:
       matrix:
         defines:
           - ""
     env:
-      UPLOAD_ARTIFACT: "false"
+      UPLOAD_ARTIFACT: "true"
       ONLY_CACHE: "false"
+      PREPARE_PATH: "Telegram/build/prepare/prepare.py"
 
     steps:
       - name: Get repository name.
         run: echo "REPO_NAME=${GITHUB_REPOSITORY##*/}" >> $GITHUB_ENV
 
       - name: Clone.
-        uses: actions/checkout@v2
+        uses: actions/checkout@v4
         with:
           submodules: recursive
           path: ${{ env.REPO_NAME }}
@@ -65,8 +64,10 @@ jobs:
       - name: First set up.
         run: |
           sudo chown -R `whoami`:admin /usr/local/share
-          brew install automake fdk-aac lame libass libtool libvorbis libvpx \
-          ninja opus sdl shtool texi2html theora x264 xvid yasm pkg-config
+
+          brew update
+          brew upgrade || true
+          brew install automake meson nasm ninja pkg-config
 
           # Disable spotlight.
           sudo mdutil -a -i off
@@ -75,21 +76,28 @@ jobs:
 
       - name: ThirdParty cache.
         id: cache-third-party
-        uses: actions/cache@v2
+        uses: actions/cache@v4
         with:
           path: ThirdParty
-          key: ${{ runner.OS }}-third-party
+          key: ${{ runner.OS }}-third-party-${{ hashFiles(format('{0}/{1}', env.REPO_NAME, env.PREPARE_PATH)) }}
+          restore-keys: ${{ runner.OS }}-third-party-
 
       - name: Libraries cache.
         id: cache-libs
-        uses: actions/cache@v2
+        uses: actions/cache@v4
         with:
           path: Libraries
-          key: ${{ runner.OS }}-libs
+          key: ${{ runner.OS }}-libs-${{ hashFiles(format('{0}/{1}', env.REPO_NAME, env.PREPARE_PATH)) }}
+          restore-keys: ${{ runner.OS }}-libs-
 
       - name: Libraries.
         run: |
           ./$REPO_NAME/Telegram/build/prepare/mac.sh skip-release silent
+
+      - name: Free up some disk space.
+        run: |
+          cd Libraries
+          find . -iname "*.dir" -exec rm -rf {} || true \;
 
       - name: Telegram Desktop build.
         if: env.ONLY_CACHE == 'false'
@@ -108,8 +116,9 @@ jobs:
           ./configure.sh \
           -D CMAKE_C_FLAGS="-Werror" \
           -D CMAKE_CXX_FLAGS="-Werror" \
+          -D CMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED=NO \
           -D TDESKTOP_API_TEST=ON \
-          -D DESKTOP_APP_USE_PACKAGED=OFF \
+          -D DESKTOP_APP_DISABLE_AUTOUPDATE=OFF \
           -D DESKTOP_APP_DISABLE_CRASH_REPORTS=OFF \
           $DEFINE
 
@@ -125,7 +134,7 @@ jobs:
           mkdir artifact
           mv Telegram.app artifact/
           mv Updater artifact/
-      - uses: actions/upload-artifact@master
+      - uses: actions/upload-artifact@v4
         if: env.UPLOAD_ARTIFACT == 'true'
         name: Upload artifact.
         with:

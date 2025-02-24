@@ -7,7 +7,10 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "editor/editor_crop.h"
 
+#include "ui/userpic_view.h"
 #include "styles/style_editor.h"
+#include "styles/style_basic.h"
+#include "styles/style_dialogs.h"
 
 namespace Editor {
 namespace {
@@ -39,6 +42,15 @@ QSizeF FlipSizeByRotation(const QSizeF &size, int angle) {
 	return (((angle / 90) % 2) == 1) ? size.transposed() : size;
 }
 
+[[nodiscard]] QRectF OriginalCrop(QSize outer, QSize inner) {
+	const auto size = inner.scaled(outer, Qt::KeepAspectRatio);
+	return QRectF(
+		(outer.width() - size.width()) / 2,
+		(outer.height() - size.height()) / 2,
+		size.width(),
+		size.height());
+}
+
 } // namespace
 
 Crop::Crop(
@@ -57,6 +69,8 @@ Crop::Crop(
 , _data(std::move(data))
 , _cropOriginal(modifications.crop.isValid()
 	? modifications.crop
+	: !_data.exactSize.isEmpty()
+	? OriginalCrop(_imageSize, _data.exactSize)
 	: QRectF(QPoint(), _imageSize))
 , _angle(modifications.angle)
 , _flipped(modifications.flipped)
@@ -66,7 +80,7 @@ Crop::Crop(
 
 	paintRequest(
 	) | rpl::start_with_next([=] {
-		Painter p(this);
+		auto p = QPainter(this);
 
 		p.fillPath(_painterPath, st::photoCropFadeBg);
 		paintPoints(p);
@@ -126,7 +140,7 @@ void Crop::applyTransform(
 	}
 }
 
-void Crop::paintPoints(Painter &p) {
+void Crop::paintPoints(QPainter &p) {
 	p.save();
 	p.setPen(Qt::NoPen);
 	p.setBrush(st::photoCropPointFg);
@@ -145,6 +159,10 @@ void Crop::setCropPaint(QRectF &&rect) {
 	_painterPath.addRect(_innerRect);
 	if (_data.cropType == EditorData::CropType::Ellipse) {
 		_painterPath.addEllipse(_cropPaint);
+	} else if (_data.cropType == EditorData::CropType::RoundedRect) {
+		const auto radius = std::min(_cropPaint.width(), _cropPaint.height())
+			* Ui::ForumUserpicRadiusMultiplier();
+		_painterPath.addRoundedRect(_cropPaint, radius, radius);
 	} else {
 		_painterPath.addRect(_cropPaint);
 	}
@@ -205,8 +223,8 @@ void Crop::computeDownState(const QPoint &p) {
 	const auto edge = mouseState(p);
 	const auto &inner = _innerRect;
 	const auto &crop = _cropPaint;
-	const auto [iLeft, iTop, iRight, iBottom] = RectEdges(inner);
-	const auto [cLeft, cTop, cRight, cBottom] = RectEdges(crop);
+	const auto &[iLeft, iTop, iRight, iBottom] = RectEdges(inner);
+	const auto &[cLeft, cTop, cRight, cBottom] = RectEdges(crop);
 	_down = InfoAtDown{
 		.rect = crop,
 		.edge = edge,

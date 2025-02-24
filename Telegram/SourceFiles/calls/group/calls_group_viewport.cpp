@@ -16,6 +16,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "media/view/media_view_pip.h"
 #include "base/platform/base_platform_info.h"
 #include "webrtc/webrtc_video_track.h"
+#include "ui/integration.h"
 #include "ui/painter.h"
 #include "ui/abstract_button.h"
 #include "ui/gl/gl_surface.h"
@@ -104,13 +105,17 @@ void Viewport::setup() {
 	}, lifetime());
 }
 
-void Viewport::setGeometry(QRect geometry) {
+void Viewport::setGeometry(bool fullscreen, QRect geometry) {
 	Expects(wide());
 
+	const auto changed = (_fullscreen != fullscreen);
+	if (changed) {
+		_fullscreen = fullscreen;
+	}
 	if (widget()->geometry() != geometry) {
 		_geometryStaleAfterModeChange = false;
 		widget()->setGeometry(geometry);
-	} else if (_geometryStaleAfterModeChange) {
+	} else if (_geometryStaleAfterModeChange || changed) {
 		_geometryStaleAfterModeChange = false;
 		updateTilesGeometry();
 	}
@@ -222,17 +227,26 @@ void Viewport::setControlsShown(float64 shown) {
 	widget()->update();
 }
 
+void Viewport::setCursorShown(bool shown) {
+	if (_cursorHidden == shown) {
+		_cursorHidden = !shown;
+		updateCursor();
+	}
+}
+
 void Viewport::add(
 		const VideoEndpoint &endpoint,
 		VideoTileTrack track,
 		rpl::producer<QSize> trackSize,
-		rpl::producer<bool> pinned) {
+		rpl::producer<bool> pinned,
+		bool self) {
 	_tiles.push_back(std::make_unique<VideoTile>(
 		endpoint,
 		track,
 		std::move(trackSize),
 		std::move(pinned),
-		[=] { widget()->update(); }));
+		[=] { widget()->update(); },
+		self));
 
 	_tiles.back()->trackSizeValue(
 	) | rpl::filter([](QSize size) {
@@ -722,7 +736,7 @@ void Viewport::updateTilesGeometryColumn(int outerWidth) {
 	};
 	const auto topPeer = _large ? _large->row()->peer().get() : nullptr;
 	const auto reorderNeeded = [&] {
-		if (!_large) {
+		if (!topPeer) {
 			return false;
 		}
 		for (const auto &tile : _tiles) {
@@ -794,7 +808,11 @@ void Viewport::setSelected(Selection value) {
 
 void Viewport::updateCursor() {
 	const auto pointer = _selected.tile && (!wide() || _hasTwoOrMore);
-	widget()->setCursor(pointer ? style::cur_pointer : style::cur_default);
+	widget()->setCursor(_cursorHidden
+		? Qt::BlankCursor
+		: pointer
+		? style::cur_pointer
+		: style::cur_default);
 }
 
 void Viewport::setPressed(Selection value) {
@@ -876,6 +894,9 @@ rpl::producer<QString> MuteButtonTooltip(not_null<GroupCall*> call) {
 	//				: tr::lng_group_call_set_reminder();
 	//		}) | rpl::flatten_latest();
 	//	}
+	if (call->rtmp()) {
+		return nullptr;
+	}
 		return call->mutedValue(
 		) | rpl::map([](MuteState muted) {
 			switch (muted) {
